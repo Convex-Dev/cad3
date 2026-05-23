@@ -1,0 +1,16 @@
+[package]
+name = "cad3"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+description = "Convex CAD3 encoded data structures, in Rust."
+license = "Apache-2.0"
+repository = "https://github.com/Convex-Dev/cad3"
+homepage = "https://docs.convex.world/cad/003_encoding/"
+documentation = "https://docs.rs/cad3"
+keywords = ["convex", "cad3", "encoding", "lattice"]
+categories = ["encoding", "data-structures"]
+readme = "README.md"
+
+[dependencies]
+sha3 = "0.10"
