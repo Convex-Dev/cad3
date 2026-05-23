@@ -46,8 +46,12 @@ pub const MAX_ENCODING_LENGTH: usize = 16383;
 /// A CAD3 cell.
 ///
 /// Cells are immutable values with a single canonical byte encoding. As more
-/// CAD3 types are implemented this enum will grow new variants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// CAD3 types are implemented this enum will grow new variants — including
+/// heavy ones that hold `Box<Inner>`, at which point `Cell` will be 16 bytes
+/// of inline value (1-byte discriminant + 7 bytes padding + 8 bytes payload).
+/// `Copy` is dropped now so callers don't grow accidental dependencies on
+/// implicit duplication; `Clone` remains. See `docs/CELL_DESIGN.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Cell {
     /// The `nil` value (tag `0x00`).
     Nil,
@@ -56,6 +60,16 @@ pub enum Cell {
     /// `true`.
     ByteFlag(u8),
 }
+
+// Compile-time tripwire: Cell, Hash, and the public DecodeError must be
+// safely shareable across threads. If any future variant accidentally
+// introduces a non-Sync type (Rc, Cell<_>, RefCell<_>) the build fails here.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Cell>();
+    assert_send_sync::<Hash>();
+    assert_send_sync::<DecodeError>();
+};
 
 impl Cell {
     /// CVM `false` (`0xB0`).
