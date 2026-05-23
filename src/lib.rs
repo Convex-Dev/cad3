@@ -28,10 +28,12 @@
 
 pub mod error;
 pub mod hash;
+pub mod sink;
 pub mod tag;
 
 pub use error::DecodeError;
 pub use hash::Hash;
+pub use sink::Sink;
 
 /// Maximum encoded length of an embedded cell, per CAD3 §"Embedded
 /// References". Cells longer than this must be referenced externally by
@@ -102,27 +104,42 @@ impl Cell {
         self.encoded_length() <= MAX_EMBEDDED_LENGTH
     }
 
-    /// Append this cell's canonical encoding to `buf`.
-    pub fn encode_to(&self, buf: &mut Vec<u8>) {
+    /// Write this cell's canonical encoding to `sink`.
+    ///
+    /// Generic over [`Sink`] so the same code path serves both encoding
+    /// (sink = [`Vec<u8>`]) and value-ID hashing (sink = `Sha3_256`),
+    /// without ever materialising the encoding into a buffer for hashing.
+    /// The `?Sized` bound permits passing a `&mut dyn Sink` trait object.
+    pub fn encode_into<S: Sink + ?Sized>(&self, sink: &mut S) {
         match self {
-            Cell::Nil => buf.push(tag::NIL),
+            Cell::Nil => sink.write(&[tag::NIL]),
             Cell::ByteFlag(n) => {
                 debug_assert!(*n <= 0x0F);
-                buf.push(tag::BYTE_FLAG_BASE | (*n & 0x0F));
+                sink.write(&[tag::BYTE_FLAG_BASE | (*n & 0x0F)]);
             }
         }
+    }
+
+    /// Append this cell's canonical encoding to `buf`. Convenience wrapper
+    /// over [`Self::encode_into`].
+    pub fn encode_to(&self, buf: &mut Vec<u8>) {
+        self.encode_into(buf);
     }
 
     /// Return this cell's canonical encoding as a fresh `Vec<u8>`.
     pub fn encoding(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.encoded_length());
-        self.encode_to(&mut buf);
+        self.encode_into(&mut buf);
         buf
     }
 
     /// SHA3-256 of this cell's canonical encoding — the CAD3 value ID.
+    ///
+    /// Streams the encoding directly into a pooled SHA3-256 hasher; does
+    /// not allocate a `Vec` for the encoding. See [`Hash::streaming`] for
+    /// the pooling design.
     pub fn value_id(&self) -> Hash {
-        Hash::of(&self.encoding())
+        Hash::streaming(|sink| self.encode_into(sink))
     }
 
     /// Decode a single cell from a byte slice. The slice must contain
