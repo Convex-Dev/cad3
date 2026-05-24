@@ -18,6 +18,10 @@ pub const BIG_INTEGER: u8 = 0x19;
 pub const DOUBLE: u8 = 0x1D;
 
 // Strings and Blobs (0x3x)
+/// UTF-8 string (children, if any, are Blobs).
+pub const STRING: u8 = 0x30;
+/// Arbitrary-length byte sequence.
+pub const BLOB: u8 = 0x31;
 /// Character base — the low two bits encode the byte count (1..=4).
 /// Tag `0x3C` = 1-byte (ASCII), `0x3D` = 2, `0x3E` = 3, `0x3F` = 4 (reserved).
 pub const CHAR_BASE: u8 = 0x3C;

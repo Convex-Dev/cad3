@@ -2,28 +2,29 @@
 //!
 //! Architectural rationale lives in `docs/CELL_DESIGN.md`. Headline:
 //! `Cell` is a 16-byte value-type enum; small variants are inline bit
-//! patterns, heavy variants (not yet implemented) hold `Arc<Inner>` for
-//! cheap-clone-by-bump semantics. Sharing happens via the inner Arc
-//! inside the variant payload, not via an outer `Arc<Cell>` wrapper.
+//! patterns, heavy variants hold `Arc<Inner>` for cheap-clone-by-bump
+//! semantics. Sharing happens via the inner Arc inside the variant
+//! payload, not via an outer `Arc<Cell>` wrapper.
 
 use std::hash::{Hash as StdHash, Hasher};
 use std::mem::discriminant;
+use std::sync::Arc;
 
+use bytes::Bytes;
+
+use crate::types::{self, BlobInner, StringInner};
 use crate::{tag, vlq, DecodeError, Hash, Sink, MAX_EMBEDDED_LENGTH};
 
 /// Canonical IEEE 754 NaN bit pattern required by CAD3 §"Double".
 const CANONICAL_NAN: u64 = 0x7ff8000000000000;
-/// Maximum valid Unicode code point (per the Unicode standard).
+/// Maximum valid Unicode code point.
 const MAX_CODE_POINT: u32 = 0x10FFFF;
 
 /// A CAD3 cell.
 ///
-/// Cells are immutable values with a single canonical byte encoding.
-///
-/// The enum is laid out as a 16-byte value type: 1-byte discriminant +
-/// 7 bytes padding + 8-byte payload slot. Small variants store their data
-/// inline; heavy variants (when added) will hold `Arc<Inner>` in the
-/// payload slot.
+/// 16-byte value-type enum: 1-byte discriminant + 7 bytes padding +
+/// 8-byte payload slot. Small variants store data inline; heavy variants
+/// hold `Arc<Inner>` to refcounted shared data.
 ///
 /// `PartialEq`/`Eq`/`Hash` are implemented manually rather than derived
 /// because [`Double`](Self::Double) carries `f64`, which doesn't impl
@@ -38,21 +39,23 @@ pub enum Cell {
     ByteFlag(u8),
     /// Signed integer in `i64` range (tags `0x10`–`0x18`).
     Long(i64),
-    /// IEEE 754 double-precision floating point (tag `0x1D`). NaN values
-    /// always encode to the canonical bit pattern
-    /// `0x7ff8000000000000`; the in-memory representation may be any
-    /// NaN bit pattern but encoding canonicalises automatically.
+    /// IEEE 754 double-precision floating point (tag `0x1D`). NaN
+    /// canonicalises to `0x7ff8000000000000` on encode.
     Double(f64),
     /// Unicode scalar value (tags `0x3C`–`0x3E`).
     Char(char),
     /// Account address — extension value `0xEA` with VLQ payload.
     Address(u64),
+    /// Arbitrary byte sequence (tag `0x31`). Currently only ≤ 4096-byte
+    /// leaf form is supported; tree form lands with `Ref`.
+    Blob(Arc<BlobInner>),
+    /// UTF-8 string (tag `0x30`). Same leaf-form-only restriction as
+    /// `Blob`. CAD3 does not enforce valid UTF-8.
+    String(Arc<StringInner>),
 }
 
 // ---------------------------------------------------------------------------
-// Manual equality / hash — needed because f64 doesn't implement Eq/Hash
-// natively. We compare and hash f64 by its bit representation so NaN is
-// equal-to-itself and distinct-NaN-bit-patterns are distinct cells.
+// Manual equality / hash
 
 impl PartialEq for Cell {
     fn eq(&self, other: &Self) -> bool {
@@ -64,6 +67,10 @@ impl PartialEq for Cell {
             (Double(a), Double(b)) => a.to_bits() == b.to_bits(),
             (Char(a), Char(b)) => a == b,
             (Address(a), Address(b)) => a == b,
+            // Arc fast-path: same allocation ⇒ equal. Otherwise compare
+            // inner bytes via Arc<T>'s deref-PartialEq.
+            (Blob(a), Blob(b)) => Arc::ptr_eq(a, b) || a == b,
+            (String(a), String(b)) => Arc::ptr_eq(a, b) || a == b,
             _ => false,
         }
     }
@@ -81,6 +88,8 @@ impl StdHash for Cell {
             Cell::Double(v) => v.to_bits().hash(state),
             Cell::Char(c) => c.hash(state),
             Cell::Address(a) => a.hash(state),
+            Cell::Blob(b) => b.hash(state),
+            Cell::String(s) => s.hash(state),
         }
     }
 }
@@ -110,6 +119,35 @@ impl Cell {
         } else {
             Cell::FALSE
         }
+    }
+
+    /// Construct a `Cell::Blob` from owned bytes.
+    ///
+    /// # Panics
+    /// Panics if the payload exceeds 4096 bytes (tree form not yet
+    /// implemented). Use [`Self::try_blob`] for a fallible variant.
+    pub fn blob(bytes: impl Into<Bytes>) -> Self {
+        Cell::Blob(Arc::new(BlobInner::leaf(bytes.into())))
+    }
+
+    /// Fallible counterpart of [`Self::blob`].
+    pub fn try_blob(bytes: impl Into<Bytes>) -> Option<Self> {
+        BlobInner::try_leaf(bytes.into()).map(|b| Cell::Blob(Arc::new(b)))
+    }
+
+    /// Construct a `Cell::String` from owned bytes (UTF-8 assumed but
+    /// not validated).
+    ///
+    /// # Panics
+    /// Panics if the payload exceeds 4096 bytes (tree form not yet
+    /// implemented). Use [`Self::try_string`] for a fallible variant.
+    pub fn string(bytes: impl Into<Bytes>) -> Self {
+        Cell::String(Arc::new(StringInner::leaf(bytes.into())))
+    }
+
+    /// Fallible counterpart of [`Self::string`].
+    pub fn try_string(bytes: impl Into<Bytes>) -> Option<Self> {
+        StringInner::try_leaf(bytes.into()).map(|s| Cell::String(Arc::new(s)))
     }
 
     /// Interpret this cell as a CVM boolean. Returns `None` for any cell
@@ -154,6 +192,34 @@ impl Cell {
             _ => None,
         }
     }
+
+    /// Borrow the payload bytes of a Blob cell. Returns `None` for any
+    /// other variant.
+    pub fn as_blob(&self) -> Option<&Bytes> {
+        match self {
+            Cell::Blob(b) => Some(b.as_bytes()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the payload bytes of a String cell. Returns `None` for any
+    /// other variant. Bytes may not be valid UTF-8; use [`Self::as_str`]
+    /// for UTF-8-validated access.
+    pub fn as_string_bytes(&self) -> Option<&Bytes> {
+        match self {
+            Cell::String(s) => Some(s.as_bytes()),
+            _ => None,
+        }
+    }
+
+    /// View this cell's payload as a `&str` if it is a String with valid
+    /// UTF-8 content.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Cell::String(s) => s.as_str(),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +235,8 @@ impl Cell {
             Cell::Double(_) => 9,
             Cell::Char(c) => 1 + min_char_bytes(*c as u32),
             Cell::Address(a) => 1 + vlq::byte_len(*a),
+            Cell::Blob(b) => b.encoded_length(),
+            Cell::String(s) => s.encoded_length(),
         }
     }
 
@@ -197,6 +265,8 @@ impl Cell {
                 sink.write(&[tag::ADDRESS]);
                 vlq::encode(*a, sink);
             }
+            Cell::Blob(b) => b.encode_into(sink),
+            Cell::String(s) => s.encode_into(sink),
         }
     }
 
@@ -214,8 +284,18 @@ impl Cell {
     }
 
     /// SHA3-256 of this cell's canonical encoding — the CAD3 value ID.
+    ///
+    /// For heavy variants (Blob, String, ...) this is cached on the
+    /// underlying `*Inner` after first computation; subsequent calls
+    /// from any clone of the cell return the cached value.
     pub fn value_id(&self) -> Hash {
-        Hash::streaming(|sink| self.encode_into(sink))
+        match self {
+            // Heavy variants delegate to their Inner so the cache is used.
+            Cell::Blob(b) => b.value_id(),
+            Cell::String(s) => s.value_id(),
+            // Small variants compute on demand — cheap (≤ 9 bytes to hash).
+            _ => Hash::streaming(|sink| self.encode_into(sink)),
+        }
     }
 }
 
@@ -244,6 +324,14 @@ impl Cell {
             tag::NIL => Ok((Cell::Nil, 1)),
             tag::LONG_BASE..=tag::LONG_MAX => decode_long(t, bytes),
             tag::DOUBLE => decode_double(bytes),
+            tag::STRING => {
+                let (payload, consumed) = types::decode_bytes_leaf(bytes)?;
+                Ok((Cell::String(Arc::new(StringInner::leaf(payload))), consumed))
+            }
+            tag::BLOB => {
+                let (payload, consumed) = types::decode_bytes_leaf(bytes)?;
+                Ok((Cell::Blob(Arc::new(BlobInner::leaf(payload))), consumed))
+            }
             0x3C..=0x3E => decode_char(t, bytes),
             0x3F => Err(DecodeError::ReservedTag(t)),
             tag::ADDRESS => decode_address(bytes),
@@ -255,7 +343,8 @@ impl Cell {
 }
 
 // ===========================================================================
-// Variant-specific encode/decode helpers
+// Variant-specific encode/decode helpers (small variants only — heavy
+// variants delegate to their *Inner type's methods)
 
 // --- Long -----------------------------------------------------------------
 
@@ -265,8 +354,6 @@ fn min_signed_bytes(v: i64) -> usize {
     if v == 0 {
         return 0;
     }
-    // For positive v: significant bits include a leading 0 sign bit.
-    // For negative v: significant bits include a leading 1 sign bit.
     let bits = if v >= 0 {
         65 - v.leading_zeros() as usize
     } else {
@@ -293,8 +380,6 @@ fn decode_long(tag: u8, bytes: &[u8]) -> Result<(Cell, usize), DecodeError> {
         return Ok((Cell::Long(0), 1));
     }
     let payload = &bytes[1..1 + n];
-    // Minimality: a leading 0x00 / 0xFF byte is redundant if the next
-    // byte's MSB matches the sign of the removed byte.
     if n > 1 {
         let top = payload[0];
         let next = payload[1];
@@ -302,7 +387,6 @@ fn decode_long(tag: u8, bytes: &[u8]) -> Result<(Cell, usize), DecodeError> {
             return Err(DecodeError::NonMinimalLong);
         }
     }
-    // Sign-extend to 8 bytes and reinterpret as i64 big-endian.
     let sign_byte = if payload[0] & 0x80 != 0 { 0xFF } else { 0x00 };
     let mut extended = [sign_byte; 8];
     extended[8 - n..].copy_from_slice(payload);
@@ -335,7 +419,6 @@ fn decode_double(bytes: &[u8]) -> Result<(Cell, usize), DecodeError> {
 
 // --- Char -----------------------------------------------------------------
 
-/// Minimum unsigned bytes to represent code point `cp`.
 fn min_char_bytes(cp: u32) -> usize {
     if cp <= 0xFF {
         1
@@ -355,13 +438,11 @@ fn encode_char<S: Sink + ?Sized>(c: char, sink: &mut S) {
 }
 
 fn decode_char(tag: u8, bytes: &[u8]) -> Result<(Cell, usize), DecodeError> {
-    let n = (tag - tag::CHAR_BASE + 1) as usize; // 1..=3 for 0x3C..=0x3E
+    let n = (tag - tag::CHAR_BASE + 1) as usize;
     if bytes.len() < 1 + n {
         return Err(DecodeError::Truncated);
     }
     let payload = &bytes[1..1 + n];
-    // Minimality: if n > 1, leading byte must be non-zero (else fewer
-    // bytes would have sufficed).
     if n > 1 && payload[0] == 0 {
         return Err(DecodeError::NonMinimalChar);
     }
@@ -378,7 +459,6 @@ fn decode_char(tag: u8, bytes: &[u8]) -> Result<(Cell, usize), DecodeError> {
 // --- Address --------------------------------------------------------------
 
 fn decode_address(bytes: &[u8]) -> Result<(Cell, usize), DecodeError> {
-    // Tag byte 0xEA already at bytes[0]; payload is VLQ.
     let (v, consumed) = vlq::decode(&bytes[1..])?;
     Ok((Cell::Address(v), 1 + consumed))
 }

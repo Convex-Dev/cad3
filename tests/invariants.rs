@@ -16,11 +16,12 @@ fn corpus_covers_every_implemented_variant() {
     use std::collections::HashSet;
     use std::mem::discriminant;
     let kinds: HashSet<_> = corpus().iter().map(discriminant).collect();
-    // Currently 6 variants: Nil, ByteFlag, Long, Double, Char, Address.
-    // Bump this number when adding new variants AND update the corpus.
+    // Currently 8 variants: Nil, ByteFlag, Long, Double, Char, Address,
+    // Blob, String. Bump this number when adding new variants AND update
+    // the corpus.
     assert_eq!(
         kinds.len(),
-        6,
+        8,
         "corpus missing a Cell variant (or has too many) — update common::corpus"
     );
 }

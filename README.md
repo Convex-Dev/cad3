@@ -25,17 +25,20 @@ See the [CAD3 specification](https://docs.convex.world/cad/003_encoding/) for fu
 
 ## Implemented
 
-| Tag(s)        | Type        | Notes                                       |
-| ------------- | ----------- | ------------------------------------------- |
-| `0x00`        | `nil`       | single-byte encoding                        |
-| `0x10`–`0x18` | Long        | signed `i64`, minimal-length two's complement |
-| `0x1D`        | Double      | IEEE 754, canonical NaN                     |
-| `0x3C`–`0x3E` | Char        | Unicode scalar, minimal-length              |
-| `0xB0`–`0xBF` | Byte flags  | `0xB0` = CVM `false`, `0xB1` = CVM `true`   |
-| `0xEA`        | Address     | account index, VLQ payload                  |
+| Tag(s)        | Type        | Notes                                                       |
+| ------------- | ----------- | ----------------------------------------------------------- |
+| `0x00`        | `nil`       | single-byte encoding                                        |
+| `0x10`–`0x18` | Long        | signed `i64`, minimal-length two's complement               |
+| `0x1D`        | Double      | IEEE 754, canonical NaN                                     |
+| `0x30`        | String      | UTF-8 (not enforced), leaf only — ≤ 4096 bytes              |
+| `0x31`        | Blob        | arbitrary bytes, leaf only — ≤ 4096 bytes                   |
+| `0x3C`–`0x3E` | Char        | Unicode scalar, minimal-length                              |
+| `0xB0`–`0xBF` | Byte flags  | `0xB0` = CVM `false`, `0xB1` = CVM `true`                   |
+| `0xEA`        | Address     | account index, VLQ payload                                  |
 
-Roadmap (in rough order): BigInt, blobs, strings, symbols, keywords,
-refs, vectors, lists, maps, sets, indexes, signed data, records.
+Roadmap (in rough order): BigInt, Symbol, Keyword, Ref + Vector (forces
+tree form for large Blob/String), List, Map, Set, Index, signed data,
+records.
 
 ## Usage
 
@@ -46,20 +49,28 @@ cad3 = "0.0.1"
 
 ```rust
 use cad3::Cell;
+use bytes::Bytes;
 
 // Encoding — one canonical byte sequence per value
-assert_eq!(Cell::Nil.encoding(),          vec![0x00]);
-assert_eq!(Cell::FALSE.encoding(),        vec![0xB0]);
-assert_eq!(Cell::Long(19).encoding(),     vec![0x11, 0x13]);
-assert_eq!(Cell::Long(-1).encoding(),     vec![0x11, 0xFF]);
-assert_eq!(Cell::Char('A').encoding(),    vec![0x3C, 0x41]);
-assert_eq!(Cell::Address(128).encoding(), vec![0xEA, 0x81, 0x00]);
+assert_eq!(Cell::Nil.encoding(),                     vec![0x00]);
+assert_eq!(Cell::FALSE.encoding(),                   vec![0xB0]);
+assert_eq!(Cell::Long(19).encoding(),                vec![0x11, 0x13]);
+assert_eq!(Cell::Char('A').encoding(),               vec![0x3C, 0x41]);
+assert_eq!(Cell::Address(128).encoding(),            vec![0xEA, 0x81, 0x00]);
+assert_eq!(Cell::string(Bytes::from_static(b"Hi")).encoding(),
+                                                     vec![0x30, 0x02, b'H', b'i']);
+assert_eq!(Cell::blob(Bytes::from_static(&[1,2,3])).encoding(),
+                                                     vec![0x31, 0x03, 1, 2, 3]);
 
 // Round trip
 let cell = Cell::decode(&Cell::Long(42).encoding()).unwrap();
 assert_eq!(cell, Cell::Long(42));
 
-// Value ID = SHA3-256 of the canonical encoding
+// Cheap sharing — cloning a heavy cell is one atomic refcount bump
+let blob = Cell::blob(Bytes::from(vec![0xAB; 4096]));
+let shared = blob.clone();   // no copy of the 4096 bytes; Arc bumped
+
+// Value ID = SHA3-256 of the canonical encoding (cached on heavy cells)
 let id = Cell::Long(42).value_id();
 println!("value id = {id}");
 ```

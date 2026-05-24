@@ -336,6 +336,198 @@ fn address_rejects_overflow() {
 }
 
 // ===========================================================================
+// Blob
+
+#[test]
+fn empty_blob_encoding() {
+    // Empty Blob: tag 0x31, length 0 (VLQ 0x00), no payload.
+    assert_eq!(Cell::blob(bytes::Bytes::new()).encoding(), vec![0x31, 0x00]);
+}
+
+#[test]
+fn small_blob_encoding() {
+    // 3-byte blob: tag, VLQ length 3, then the bytes.
+    let c = Cell::blob(bytes::Bytes::from_static(&[0x01, 0x02, 0x03]));
+    assert_eq!(c.encoding(), vec![0x31, 0x03, 0x01, 0x02, 0x03]);
+}
+
+#[test]
+fn blob_round_trip_at_size_boundaries() {
+    for size in [0usize, 1, 127, 128, 200, 4095, 4096] {
+        let data = vec![(size & 0xFF) as u8; size];
+        let original = Cell::blob(bytes::Bytes::from(data));
+        let enc = original.encoding();
+        let decoded = Cell::decode(&enc).unwrap();
+        assert_eq!(decoded, original, "round trip failed at size {size}");
+    }
+}
+
+#[test]
+fn blob_construction_too_large_panics() {
+    let result = std::panic::catch_unwind(|| {
+        Cell::blob(bytes::Bytes::from(vec![0u8; 4097]));
+    });
+    assert!(result.is_err(), "Cell::blob > 4096 bytes should panic");
+}
+
+#[test]
+fn blob_try_construction_too_large_returns_none() {
+    assert!(Cell::try_blob(bytes::Bytes::from(vec![0u8; 4097])).is_none());
+}
+
+#[test]
+fn blob_decode_rejects_tree_form() {
+    // A leaf blob with declared length 5000 (> 4096) is the start of a
+    // tree-form encoding, which we don't yet support.
+    // VLQ for 5000: 5000 = 0b1001110001000 → 0xA7 0x08
+    let mut bytes = vec![0x31, 0xA7, 0x08];
+    bytes.extend(std::iter::repeat_n(0u8, 5000));
+    assert_eq!(Cell::decode(&bytes), Err(DecodeError::TreeNotImplemented));
+}
+
+#[test]
+fn blob_decode_rejects_truncated() {
+    // Header says 10 bytes but only 3 follow.
+    assert_eq!(
+        Cell::decode(&[0x31, 0x0A, 0x01, 0x02, 0x03]),
+        Err(DecodeError::Truncated)
+    );
+}
+
+#[test]
+fn blob_as_blob_accessor() {
+    let payload = bytes::Bytes::from_static(b"hello");
+    let c = Cell::blob(payload.clone());
+    assert_eq!(c.as_blob(), Some(&payload));
+    assert_eq!(Cell::Nil.as_blob(), None);
+}
+
+#[test]
+fn blob_clone_is_arc_bump_not_deep_copy() {
+    use std::sync::Arc;
+    let original = Cell::blob(bytes::Bytes::from(vec![0xAB; 4096]));
+    let cloned = original.clone();
+    let Cell::Blob(a) = &original else {
+        panic!();
+    };
+    let Cell::Blob(b) = &cloned else {
+        panic!();
+    };
+    // Same heap allocation — clone bumped the Arc, didn't copy BlobInner.
+    assert!(Arc::ptr_eq(a, b));
+}
+
+#[test]
+fn blob_value_id_cached_on_inner() {
+    use std::sync::Arc;
+    let cell = Cell::blob(bytes::Bytes::from(vec![1, 2, 3, 4]));
+    let id1 = cell.value_id();
+    let id2 = cell.value_id();
+    assert_eq!(id1, id2);
+    // The Inner's cache is shared across clones.
+    let cloned = cell.clone();
+    let id3 = cloned.value_id();
+    assert_eq!(id1, id3);
+    // Sanity: matches the buffered SHA3 path.
+    assert_eq!(id1, Hash::of(&cell.encoding()));
+    // Cells with the same content but different Arc allocations also match.
+    let independent = Cell::blob(bytes::Bytes::from(vec![1, 2, 3, 4]));
+    let Cell::Blob(a) = &cell else { panic!() };
+    let Cell::Blob(b) = &independent else {
+        panic!()
+    };
+    assert!(!Arc::ptr_eq(a, b));
+    assert_eq!(independent.value_id(), id1);
+}
+
+// ===========================================================================
+// String
+
+#[test]
+fn empty_string_encoding() {
+    assert_eq!(
+        Cell::string(bytes::Bytes::new()).encoding(),
+        vec![0x30, 0x00]
+    );
+}
+
+#[test]
+fn string_hello_encoding() {
+    // "Hi" = 0x48 0x69 → tag 0x30, length 2, bytes.
+    assert_eq!(
+        Cell::string(bytes::Bytes::from_static(b"Hi")).encoding(),
+        vec![0x30, 0x02, b'H', b'i']
+    );
+}
+
+#[test]
+fn string_utf8_multibyte_encoding() {
+    // "中" = 3 UTF-8 bytes E4 B8 AD
+    let payload = "中";
+    let c = Cell::string(bytes::Bytes::from_static(payload.as_bytes()));
+    assert_eq!(c.encoding(), vec![0x30, 0x03, 0xE4, 0xB8, 0xAD]);
+}
+
+#[test]
+fn string_round_trip_at_size_boundaries() {
+    for size in [0usize, 1, 127, 128, 200, 4095, 4096] {
+        // Use ASCII so length-in-bytes == length-in-chars and validation passes.
+        let data = vec![b'a'; size];
+        let original = Cell::string(bytes::Bytes::from(data));
+        let decoded = Cell::decode(&original.encoding()).unwrap();
+        assert_eq!(decoded, original, "round trip failed at size {size}");
+    }
+}
+
+#[test]
+fn string_construction_too_large_panics() {
+    let result = std::panic::catch_unwind(|| {
+        Cell::string(bytes::Bytes::from(vec![b'x'; 4097]));
+    });
+    assert!(result.is_err(), "Cell::string > 4096 bytes should panic");
+}
+
+#[test]
+fn string_decode_rejects_tree_form() {
+    let mut bytes = vec![0x30, 0xA7, 0x08]; // tag + VLQ(5000)
+    bytes.extend(std::iter::repeat_n(b'x', 5000));
+    assert_eq!(Cell::decode(&bytes), Err(DecodeError::TreeNotImplemented));
+}
+
+#[test]
+fn string_invalid_utf8_accepted_but_as_str_returns_none() {
+    // Per CAD3, the encoding does NOT enforce UTF-8 — we accept it but
+    // `as_str()` returns None.
+    let invalid: &[u8] = &[0xFF, 0xFE, 0xFD];
+    let cell = Cell::string(bytes::Bytes::from_static(invalid));
+    assert_eq!(cell.as_string_bytes().unwrap().as_ref(), invalid);
+    assert_eq!(cell.as_str(), None);
+    // Round-trips fine despite invalid bytes.
+    assert_eq!(Cell::decode(&cell.encoding()).unwrap(), cell);
+}
+
+#[test]
+fn string_as_str_accessor() {
+    let cell = Cell::string(bytes::Bytes::from_static(b"Hello"));
+    assert_eq!(cell.as_str(), Some("Hello"));
+    assert_eq!(Cell::Nil.as_str(), None);
+    assert_eq!(
+        Cell::blob(bytes::Bytes::from_static(b"Hello")).as_str(),
+        None
+    );
+}
+
+#[test]
+fn blob_and_string_distinct_value_ids_for_same_bytes() {
+    // Same byte payload, different tag → different encoding → different value ID.
+    let payload = bytes::Bytes::from_static(b"hello");
+    let blob = Cell::blob(payload.clone());
+    let string = Cell::string(payload);
+    assert_ne!(blob, string);
+    assert_ne!(blob.value_id(), string.value_id());
+}
+
+// ===========================================================================
 // Common encoding behaviour
 
 #[test]

@@ -32,6 +32,11 @@ pub enum DecodeError {
     VlqOverflow,
     /// VLQ continuation bit was set at the end of input.
     UnterminatedVlq,
+    /// Encoding requires CAD3 tree structure (e.g. a Blob or String
+    /// payload longer than 4096 bytes, or a Vector with more than 16
+    /// elements). Tree-form encoding/decoding is not yet implemented in
+    /// this version of the crate — see the crate roadmap.
+    TreeNotImplemented,
 }
 
 impl fmt::Display for DecodeError {
@@ -63,6 +68,10 @@ impl fmt::Display for DecodeError {
             DecodeError::UnterminatedVlq => {
                 write!(f, "VLQ continuation bit set at end of input")
             }
+            DecodeError::TreeNotImplemented => write!(
+                f,
+                "encoding requires CAD3 tree structure, which is not yet implemented"
+            ),
         }
     }
 }

@@ -14,3 +14,4 @@ readme = "README.md"
 
 [dependencies]
 sha3 = "0.10"
+bytes = "1"

@@ -200,6 +200,23 @@ pub fn corpus() -> Vec<Cell> {
         Cell::Address(16_384),
         Cell::Address(1 << 35),
         Cell::Address(i64::MAX as u64),
+        // Blob — empty, small, max embeddable, max leaf
+        Cell::blob(bytes::Bytes::new()),
+        Cell::blob(bytes::Bytes::from_static(b"\x00\x01\x02\x03")),
+        // 137 bytes: encoded length is exactly MAX_EMBEDDED_LENGTH (1+2+137).
+        Cell::blob(bytes::Bytes::from(vec![0xAA; 137])),
+        // 138 bytes: just above embed limit but still in-leaf.
+        Cell::blob(bytes::Bytes::from(vec![0xBB; 138])),
+        // 4096 bytes: max leaf size.
+        Cell::blob(bytes::Bytes::from(vec![0xCC; 4096])),
+        // String — empty, ASCII, UTF-8 multibyte, max leaf
+        Cell::string(bytes::Bytes::from_static(b"")),
+        Cell::string(bytes::Bytes::from_static(b"Hello, world!")),
+        Cell::string(bytes::Bytes::from_static(
+            "中文测试 — UTF-8 multibyte".as_bytes(),
+        )),
+        // 4096 bytes of valid UTF-8 (ASCII).
+        Cell::string(bytes::Bytes::from(vec![b'x'; 4096])),
     ];
 
     // A handful of "interesting" Long values from real-world ranges.

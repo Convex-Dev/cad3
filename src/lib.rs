@@ -9,6 +9,8 @@
 //! - `nil` (tag `0x00`)
 //! - Long integers (tags `0x10`–`0x18`)
 //! - Doubles (tag `0x1D`, with canonical NaN)
+//! - Strings (tag `0x30`, leaf only — ≤ 4096 bytes)
+//! - Blobs (tag `0x31`, leaf only — ≤ 4096 bytes)
 //! - Characters (tags `0x3C`–`0x3E`)
 //! - Byte flags (tags `0xB0`–`0xBF`), including the CVM booleans
 //! - Addresses (extension value `0xEA`)
@@ -25,11 +27,12 @@
 //! ```
 //! use cad3::Cell;
 //!
-//! assert_eq!(Cell::Nil.encoding(),         vec![0x00]);
-//! assert_eq!(Cell::FALSE.encoding(),       vec![0xB0]);
-//! assert_eq!(Cell::Long(0).encoding(),     vec![0x10]);
-//! assert_eq!(Cell::Long(19).encoding(),    vec![0x11, 0x13]);
-//! assert_eq!(Cell::Address(0).encoding(),  vec![0xEA, 0x00]);
+//! assert_eq!(Cell::Nil.encoding(),                  vec![0x00]);
+//! assert_eq!(Cell::FALSE.encoding(),                vec![0xB0]);
+//! assert_eq!(Cell::Long(19).encoding(),             vec![0x11, 0x13]);
+//! assert_eq!(Cell::Address(0).encoding(),           vec![0xEA, 0x00]);
+//! assert_eq!(Cell::string("Hi").encoding(),         vec![0x30, 0x02, b'H', b'i']);
+//! assert_eq!(Cell::blob(vec![1, 2, 3]).encoding(),  vec![0x31, 0x03, 1, 2, 3]);
 //!
 //! let round_tripped = Cell::decode(&Cell::Long(-1).encoding()).unwrap();
 //! assert_eq!(round_tripped, Cell::Long(-1));
@@ -40,12 +43,14 @@ pub mod error;
 pub mod hash;
 pub mod sink;
 pub mod tag;
+pub mod types;
 pub mod vlq;
 
 pub use cell::Cell;
 pub use error::DecodeError;
 pub use hash::Hash;
 pub use sink::Sink;
+pub use types::{BlobInner, StringInner};
 
 /// Maximum encoded length of an embedded cell, per CAD3 §"Embedded
 /// References". Cells longer than this must be referenced externally by
@@ -55,14 +60,17 @@ pub const MAX_EMBEDDED_LENGTH: usize = 140;
 /// Maximum encoded length of any single cell, per CAD3 §"Encoding".
 pub const MAX_ENCODING_LENGTH: usize = 16383;
 
-// Compile-time tripwire: Cell, Hash, and the public DecodeError must be
-// safely shareable across threads. If any future variant accidentally
-// introduces a non-Sync type (Rc, Cell<_>, RefCell<_>) the build fails here.
+// Compile-time tripwire: Cell, Hash, DecodeError, and the Inner types
+// behind Arc must all be safely shareable across threads. If any future
+// variant accidentally introduces a non-Sync type (Rc, Cell<_>, RefCell<_>)
+// the build fails here.
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Cell>();
     assert_send_sync::<Hash>();
     assert_send_sync::<DecodeError>();
+    assert_send_sync::<BlobInner>();
+    assert_send_sync::<StringInner>();
 };
 
 // Pin Cell at 16 bytes (1-byte discriminant + 7 bytes padding + 8-byte
