@@ -7,8 +7,11 @@
 //! Currently supported:
 //!
 //! - `nil` (tag `0x00`)
-//! - Byte flags `0xB0`–`0xBF`, including the CVM booleans `false` (`0xB0`)
-//!   and `true` (`0xB1`)
+//! - Long integers (tags `0x10`–`0x18`)
+//! - Doubles (tag `0x1D`, with canonical NaN)
+//! - Characters (tags `0x3C`–`0x3E`)
+//! - Byte flags (tags `0xB0`–`0xBF`), including the CVM booleans
+//! - Addresses (extension value `0xEA`)
 //!
 //! Every cell has a single canonical byte encoding; its SHA3-256 hash is the
 //! cell's [value ID](Cell::value_id).
@@ -22,12 +25,14 @@
 //! ```
 //! use cad3::Cell;
 //!
-//! assert_eq!(Cell::Nil.encoding(),   vec![0x00]);
-//! assert_eq!(Cell::FALSE.encoding(), vec![0xB0]);
-//! assert_eq!(Cell::TRUE.encoding(),  vec![0xB1]);
+//! assert_eq!(Cell::Nil.encoding(),         vec![0x00]);
+//! assert_eq!(Cell::FALSE.encoding(),       vec![0xB0]);
+//! assert_eq!(Cell::Long(0).encoding(),     vec![0x10]);
+//! assert_eq!(Cell::Long(19).encoding(),    vec![0x11, 0x13]);
+//! assert_eq!(Cell::Address(0).encoding(),  vec![0xEA, 0x00]);
 //!
-//! let round_tripped = Cell::decode(&Cell::TRUE.encoding()).unwrap();
-//! assert_eq!(round_tripped, Cell::TRUE);
+//! let round_tripped = Cell::decode(&Cell::Long(-1).encoding()).unwrap();
+//! assert_eq!(round_tripped, Cell::Long(-1));
 //! ```
 
 pub mod cell;
@@ -35,6 +40,7 @@ pub mod error;
 pub mod hash;
 pub mod sink;
 pub mod tag;
+pub mod vlq;
 
 pub use cell::Cell;
 pub use error::DecodeError;
@@ -58,3 +64,12 @@ const _: fn() = || {
     assert_send_sync::<Hash>();
     assert_send_sync::<DecodeError>();
 };
+
+// Pin Cell at 16 bytes (1-byte discriminant + 7 bytes padding + 8-byte
+// payload). Any new variant whose payload exceeds 8 bytes — or whose
+// alignment exceeds 8 — bloats Cell beyond 16 and fails the build here.
+// See docs/CELL_DESIGN.md §"Cell, byte by byte".
+const _: () = assert!(
+    std::mem::size_of::<Cell>() == 16,
+    "Cell must remain 16 bytes; see docs/CELL_DESIGN.md"
+);
